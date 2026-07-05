@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CONSENSO · Monitor Sociofisico</title>
+<style>
+  :root{
+    --fosforo:#33ff66; --fosforo-dim:#1a8f3c; --fosforo-dark:#0a3a18;
+    --ambra:#ffb000; --ciano:#00e5ff; --nero:#020803;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    background:var(--nero); color:var(--fosforo);
+    font-family:"Courier New",Courier,monospace;
+    display:flex;flex-direction:column;align-items:center;
+    padding:8px; min-height:100vh;
+  }
+  body::after{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:50;
+    background:repeating-linear-gradient(0deg,rgba(0,0,0,.20) 0 1px,transparent 1px 3px);
+  }
+  .wrap{width:100%;max-width:620px;display:flex;flex-direction:column;gap:8px}
+  header{
+    border:2px solid var(--fosforo-dim); padding:6px 10px; text-align:center;
+    background:linear-gradient(180deg,#04160a,#020803);
+  }
+  header h1{font-size:15px;letter-spacing:3px;color:var(--ambra);text-shadow:0 0 8px var(--ambra)}
+  header .sub{font-size:10px;color:var(--fosforo-dim);letter-spacing:2px;margin-top:2px}
+  .panel{border:1px solid var(--fosforo-dark);background:#03120880;padding:8px}
+  .panel h2{font-size:11px;letter-spacing:2px;color:var(--ciano);text-shadow:0 0 5px var(--ciano);margin-bottom:6px}
+  canvas{display:block;width:100%}
+  #cvPolls{height:230px}
+  #cvViews{height:170px}
+  #cvTrends{height:170px}
+  .chips{display:flex;flex-wrap:wrap;gap:5px;margin-top:7px}
+  .chip{
+    font-family:inherit;font-size:10px;letter-spacing:1px;padding:5px 8px;
+    background:#04160a;border:1px solid var(--fosforo-dark);color:#557;cursor:pointer;
+  }
+  .chip.on{color:#000;font-weight:bold}
+  .readout{width:100%;border-collapse:collapse;font-size:11px}
+  .readout td{padding:3px 6px;border-bottom:1px solid var(--fosforo-dark)}
+  .readout td:last-child{text-align:right;color:var(--ambra)}
+  .readout .delta-up{color:var(--fosforo)} .readout .delta-dn{color:#ff5566}
+  .msg{font-size:10px;color:var(--fosforo-dim);letter-spacing:1px;padding:4px 0}
+  .err{color:#ff5566}
+  footer{font-size:9px;color:var(--fosforo-dim);text-align:center;letter-spacing:1px;padding:6px;line-height:1.6}
+  .blink{animation:bl 1s steps(2) infinite}
+  @keyframes bl{50%{opacity:0}}
+  @media (prefers-reduced-motion: reduce){ .blink{animation:none} body::after{display:none} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>■ CONSENSO 200 ■</h1>
+    <div class="sub">MONITOR SOCIOFISICO · SONDAGGI + ATTENZIONE MEDIATICA</div>
+  </header>
+
+  <div class="panel">
+    <h2>▮ SUPERMEDIA — ULTIMO VALORE</h2>
+    <table class="readout" id="readout"><tr><td class="msg">Caricamento sondaggi<span class="blink">_</span></td></tr></table>
+  </div>
+
+  <div class="panel">
+    <h2>▮ SONDAGGI — INTENZIONI DI VOTO (12 MESI)</h2>
+    <div class="msg" id="msgPolls">Interrogazione archivio Wikipedia<span class="blink">_</span></div>
+    <canvas id="cvPolls"></canvas>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="panel">
+    <h2>▮ ATTENZIONE MEDIATICA — VISITE WIKIPEDIA LEADER (90 GG)</h2>
+    <div class="msg" id="msgViews">Interrogazione Wikimedia Pageviews<span class="blink">_</span></div>
+    <canvas id="cvViews"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>▮ GOOGLE TRENDS — RICERCHE LEADER (90 GG · ITALIA)</h2>
+    <div class="msg" id="msgTrends">Interrogazione proxy Trends<span class="blink">_</span></div>
+    <canvas id="cvTrends"></canvas>
+  </div>
+
+  <footer>
+    FONTI: en.wikipedia.org (Opinion polling for the next Italian general election)<br>
+    wikimedia.org/api/rest_v1 (pageviews, media mobile 7gg, it.wikipedia)<br>
+    trends.google.com via Netlify Function (indice relativo 0–100, geo IT)<br>
+    SUPERMEDIA = regressione locale con kernel gaussiano (banda 15 gg)
+  </footer>
+</div>
+
+<script>
+(function(){
+  // ---------- configurazione ----------
+  const PARTIES = [
+    {key:'FdI',  match:/fdi|fratelli/i,          color:'#5c8dff', leader:'Giorgia_Meloni',  leaderName:'Meloni'},
+    {key:'PD',   match:/^pd$|democratic/i,        color:'#ff5566', leader:'Elly_Schlein',    leaderName:'Schlein'},
+    {key:'M5S',  match:/m5s|five star/i,          color:'#ffd633', leader:'Giuseppe_Conte',  leaderName:'Conte'},
+    {key:'FI',   match:/^fi$|forza/i,             color:'#66e0ff', leader:'Antonio_Tajani',  leaderName:'Tajani'},
+    {key:'Lega', match:/lega|league/i,            color:'#33ff66', leader:'Matteo_Salvini',  leaderName:'Salvini'},
+    {key:'AVS',  match:/avs|verdi|greens/i,       color:'#cc66ff', leader:null,              leaderName:null},
+  ];
+  const WIKI_PAGE = 'Opinion_polling_for_the_next_Italian_general_election';
+  const DAYS_BACK = 365;
+  const BANDWIDTH = 15; // giorni, kernel supermedia
+  const dpr = devicePixelRatio || 1;
+  const MONTHS = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+  const MESI_IT = ['GEN','FEB','MAR','APR','MAG','GIU','LUG','AGO','SET','OTT','NOV','DIC'];
+
+  let polls = [];            // {date:Date, values:{FdI:.., ...}}
+  let visible = Object.fromEntries(PARTIES.map(p=>[p.key,true]));
+
+  // ---------- utilità ----------
+  const $ = id => document.getElementById(id);
+  function setMsg(id, text, isErr){
+    const el = $(id);
+    el.textContent = text;
+    el.className = 'msg' + (isErr ? ' err' : '');
+  }
+
+  function parseLastDate(text, fallbackYear){
+    // cattura l'ultima data tipo "26–28 May 2026" / "3 Jun" — usa l'ultimo match
+    const re = /(\d{1,2})\s+([A-Za-z]{3})[a-z]*\.?\s*(\d{4})?/g;
+    let m, last=null;
+    while((m = re.exec(text)) !== null) last = m;
+    if(!last) return null;
+    const mon = MONTHS[last[2].slice(0,3).toLowerCase()];
+    if(mon === undefined) return null;
+    const year = last[3] ? parseInt(last[3]) : fallbackYear;
+    if(!year) return null;
+    return new Date(year, mon, parseInt(last[1]));
+  }
+
+  // ---------- sondaggi da Wikipedia ----------
+  async function loadPolls(){
+    const base = `https://en.wikipedia.org/w/api.php?format=json&origin=*&action=parse&page=${WIKI_PAGE}`;
+    // 1) elenco sezioni → trova le sezioni-anno più recenti
+    const secRes = await fetch(base + '&prop=sections').then(r=>r.json());
+    if(secRes.error) throw new Error(secRes.error.info || 'API Wikipedia non disponibile');
+    const yearSecs = secRes.parse.sections
+      .filter(s => /^20\d\d$/.test(s.line.trim()))
+      .map(s => ({year: parseInt(s.line), index: s.index}));
+    const years = [...new Set(yearSecs.map(s=>s.year))].sort((a,b)=>b-a).slice(0,2);
+    const targets = yearSecs.filter(s => years.includes(s.year));
+    if(targets.length === 0) throw new Error('Sezioni annuali non trovate nella pagina');
+
+    // 2) scarica e analizza ogni sezione
+    const cutoff = Date.now() - DAYS_BACK*86400e3;
+    for(const sec of targets){
+      const res = await fetch(base + `&prop=text&section=${sec.index}`).then(r=>r.json());
+      if(!res.parse) continue;
+      const doc = new DOMParser().parseFromString(res.parse.text['*'], 'text/html');
+      for(const table of doc.querySelectorAll('table.wikitable')){
+        parseTable(table, sec.year, cutoff);
+      }
+    }
+    polls.sort((a,b)=>a.date-b.date);
+    if(polls.length === 0) throw new Error('Nessun sondaggio riconosciuto: la struttura della pagina è cambiata');
+  }
+
+  function parseTable(table, year, cutoff){
+    const rows = [...table.querySelectorAll('tr')];
+    // riga intestazione: quella che contiene FdI
+    let colMap = null, dateCol = 0;
+    for(const tr of rows){
+      const cells = [...tr.children];
+      const texts = cells.map(c=>c.textContent.trim());
+      if(texts.some(t=>/fdi|fratelli/i.test(t))){
+        colMap = {};
+        texts.forEach((t,i)=>{
+          if(/date|fieldwork/i.test(t)) dateCol = i;
+          for(const p of PARTIES){
+            if(colMap[p.key]===undefined && p.match.test(t)) colMap[p.key]=i;
+          }
+        });
+        break;
+      }
+    }
+    if(!colMap || colMap.FdI===undefined || colMap.PD===undefined) return; // non è la tabella dei partiti
+
+    for(const tr of rows){
+      const cells = [...tr.children];
+      if(cells.length < 4 || cells[0].tagName==='TH' && cells.length < 6) continue;
+      const dateText = cells[dateCol] ? cells[dateCol].textContent : cells[0].textContent;
+      const date = parseLastDate(dateText, year);
+      if(!date || date.getTime() < cutoff || date.getTime() > Date.now()+86400e3) continue;
+      const values = {};
+      let found = 0;
+      for(const p of PARTIES){
+        const ci = colMap[p.key];
+        if(ci===undefined || !cells[ci]) continue;
+        const v = parseFloat(cells[ci].textContent.replace(',','.'));
+        if(!isNaN(v) && v>0 && v<60){ values[p.key]=v; found++; }
+      }
+      if(found >= 3) polls.push({date, values});
+    }
+  }
+
+  // ---------- supermedia: kernel gaussiano ----------
+  function smoothAt(t, key){
+    let num=0, den=0;
+    const bw = BANDWIDTH*86400e3;
+    for(const p of polls){
+      if(p.values[key]===undefined) continue;
+      const d = (t - p.date.getTime())/bw;
+      const w = Math.exp(-0.5*d*d);
+      num += w*p.values[key]; den += w;
+    }
+    return den>0 ? num/den : null;
+  }
+
+  function buildSmoothSeries(key){
+    if(polls.length===0) return [];
+    const t0 = polls[0].date.getTime(), t1 = polls[polls.length-1].date.getTime();
+    const pts=[], step=(t1-t0)/120 || 86400e3;
+    for(let t=t0;t<=t1;t+=step) {
+      const v = smoothAt(t,key);
+      if(v!==null) pts.push({t,v});
+    }
+    return pts;
+  }
+
+  // ---------- grafico canvas fosforo ----------
+  function drawChart(cv, seriesList, scatter, yFmt){
+    const w = cv.width = cv.clientWidth*dpr, h = cv.height = cv.clientHeight*dpr;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle='#010604'; ctx.fillRect(0,0,w,h);
+    const padL=34*dpr, padR=6*dpr, padT=8*dpr, padB=20*dpr;
+
+    let tMin=Infinity,tMax=-Infinity,vMin=Infinity,vMax=-Infinity;
+    for(const s of seriesList){ for(const p of s.pts){
+      if(p.t<tMin)tMin=p.t; if(p.t>tMax)tMax=p.t;
+      if(p.v<vMin)vMin=p.v; if(p.v>vMax)vMax=p.v;
+    }}
+    if(scatter) for(const pt of scatter){ if(pt.v<vMin)vMin=pt.v; if(pt.v>vMax)vMax=pt.v; }
+    if(!isFinite(tMin)) return;
+    const vPad=(vMax-vMin)*0.1||1; vMin-=vPad; vMax+=vPad;
+    const X=t=>padL+(t-tMin)/(tMax-tMin||1)*(w-padL-padR);
+    const Y=v=>h-padB-(v-vMin)/(vMax-vMin)*(h-padT-padB);
+
+    // griglia + assi
+    ctx.strokeStyle='#0a3a18'; ctx.fillStyle='#1a8f3c';
+    ctx.font=`${9*dpr}px Courier New`; ctx.lineWidth=1;
+    for(let i=0;i<=4;i++){
+      const v=vMin+(vMax-vMin)*i/4, y=Y(v);
+      ctx.beginPath();ctx.moveTo(padL,y);ctx.lineTo(w-padR,y);ctx.stroke();
+      ctx.fillText(yFmt(v), 2*dpr, y+3*dpr);
+    }
+    const nT=5;
+    for(let i=0;i<=nT;i++){
+      const t=tMin+(tMax-tMin)*i/nT, d=new Date(t);
+      ctx.fillText(`${d.getDate()} ${MESI_IT[d.getMonth()]}`, X(t)-14*dpr, h-6*dpr);
+    }
+
+    // punti grezzi (sondaggi singoli)
+    if(scatter){
+      for(const pt of scatter){
+        ctx.fillStyle = pt.color+'55';
+        ctx.fillRect(X(pt.t)-1.5*dpr, Y(pt.v)-1.5*dpr, 3*dpr, 3*dpr);
+      }
+    }
+    // linee smussate
+    for(const s of seriesList){
+      ctx.strokeStyle=s.color; ctx.lineWidth=1.6*dpr;
+      ctx.shadowColor=s.color; ctx.shadowBlur=5*dpr;
+      ctx.beginPath();
+      s.pts.forEach((p,i)=> i? ctx.lineTo(X(p.t),Y(p.v)) : ctx.moveTo(X(p.t),Y(p.v)));
+      ctx.stroke();
+    }
+    ctx.shadowBlur=0;
+  }
+
+  function renderPolls(){
+    const active = PARTIES.filter(p=>visible[p.key]);
+    const series = active.map(p=>({color:p.color, pts:buildSmoothSeries(p.key)}));
+    const scatter=[];
+    for(const p of active) for(const poll of polls)
+      if(poll.values[p.key]!==undefined)
+        scatter.push({t:poll.date.getTime(), v:poll.values[p.key], color:p.color});
+    drawChart($('cvPolls'), series, scatter, v=>v.toFixed(0)+'%');
+  }
+
+  function renderReadout(){
+    const now = polls[polls.length-1].date.getTime();
+    const monthAgo = now - 30*86400e3;
+    const rows = PARTIES.map(p=>{
+      const v = smoothAt(now,p.key), old = smoothAt(monthAgo,p.key);
+      if(v===null) return '';
+      const d = old!==null ? v-old : 0;
+      const cls = d>=0 ? 'delta-up':'delta-dn';
+      const sign = d>=0 ? '▲':'▼';
+      return `<tr><td style="color:${p.color}">■ ${p.key}</td>`+
+             `<td class="${cls}">${sign} ${Math.abs(d).toFixed(1)} /30gg</td>`+
+             `<td>${v.toFixed(1)}%</td></tr>`;
+    }).join('');
+    $('readout').innerHTML = rows;
+  }
+
+  function buildChips(){
+    const box = $('chips');
+    for(const p of PARTIES){
+      const b = document.createElement('button');
+      b.className='chip on'; b.textContent=p.key;
+      b.style.background=p.color; b.style.borderColor=p.color;
+      b.addEventListener('click',()=>{
+        visible[p.key]=!visible[p.key];
+        b.classList.toggle('on',visible[p.key]);
+        b.style.background = visible[p.key]? p.color : '#04160a';
+        b.style.color = visible[p.key]? '#000' : '#557';
+        renderPolls();
+      });
+      box.appendChild(b);
+    }
+  }
+
+  // ---------- pageviews leader ----------
+  async function loadViews(){
+    const fmt = d => d.toISOString().slice(0,10).replace(/-/g,'');
+    const end = new Date(Date.now()-86400e3);        // ieri (dati odierni non pronti)
+    const start = new Date(Date.now()-91*86400e3);
+    const leaders = PARTIES.filter(p=>p.leader);
+    const series=[];
+    await Promise.all(leaders.map(async p=>{
+      const url = `https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/it.wikipedia/all-access/user/${p.leader}/daily/${fmt(start)}00/${fmt(end)}00`;
+      try{
+        const res = await fetch(url).then(r=>r.json());
+        if(!res.items) return;
+        const raw = res.items.map(it=>({
+          t: new Date(it.timestamp.slice(0,4)+'-'+it.timestamp.slice(4,6)+'-'+it.timestamp.slice(6,8)).getTime(),
+          v: it.views
+        }));
+        // media mobile 7 giorni
+        const pts = raw.map((_,i)=>{
+          const win = raw.slice(Math.max(0,i-6), i+1);
+          return {t: raw[i].t, v: win.reduce((a,b)=>a+b.v,0)/win.length};
+        });
+        series.push({color:p.color, pts, name:p.leaderName});
+      }catch(e){ /* singolo leader mancante: prosegui */ }
+    }));
+    if(series.length===0) throw new Error('Pageviews non disponibili');
+    drawChart($('cvViews'), series, null, v=> v>=1000 ? (v/1000).toFixed(0)+'k' : v.toFixed(0));
+    setMsg('msgViews','Media mobile 7gg · colori come i partiti · scala: visite/giorno');
+  }
+
+  // ---------- Google Trends via Netlify Function ----------
+  async function loadTrends(){
+    if(location.protocol === 'file:'){
+      setMsg('msgTrends','Pannello attivo dopo il deploy su Netlify (richiede la function proxy)');
+      return;
+    }
+    const res = await fetch('/.netlify/functions/trends').then(r=>r.json());
+    if(res.error) throw new Error(res.error);
+    const leaders = PARTIES.filter(p=>p.leader);
+    const series = res.series
+      .filter(s => s.points.length > 0)
+      .map(s => {
+        // media mobile 4 punti per pulire il rumore giornaliero
+        const pts = s.points.map((p,j)=>{
+          const win = s.points.slice(Math.max(0,j-3), j+1);
+          return {t:p.t, v: win.reduce((a,b)=>a+b.v,0)/win.length};
+        });
+        const leader = leaders.find(l => l.leaderName && s.keyword.includes(l.leaderName));
+        return {color: leader ? leader.color : '#ffffff', pts};
+      });
+    if(series.length===0) throw new Error('Nessuna serie ricevuta da Trends');
+    drawChart($('cvTrends'), series, null, v=>v.toFixed(0));
+    setMsg('msgTrends','Indice relativo 0–100 · media mobile 4gg · colori come i partiti');
+  }
+
+  // ---------- avvio ----------
+  buildChips();
+  loadPolls().then(()=>{
+    setMsg('msgPolls', `${polls.length} sondaggi caricati · punti = rilevazioni singole · linee = supermedia`);
+    renderPolls(); renderReadout();
+  }).catch(e=>{
+    setMsg('msgPolls','ERRORE: '+e.message, true);
+    $('readout').innerHTML = '<tr><td class="msg err">Dati sondaggi non disponibili</td></tr>';
+  });
+  loadViews().catch(e=> setMsg('msgViews','ERRORE: '+e.message, true));
+  loadTrends().catch(e=> setMsg('msgTrends','ERRORE: '+e.message, true));
+
+  addEventListener('resize', ()=>{ if(polls.length){renderPolls();} });
+})();
+</script>
+</body>
+</html>
